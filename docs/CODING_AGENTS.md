@@ -74,7 +74,10 @@ model_list:
 bash scripts/omp-setup.sh                 # adds a `club` provider to ~/.omp/agent/models.yml
 bash scripts/switch.sh --force vllm/qwen38-27b-dual-fast   # experimental slug: --force
 omp models club                           # the live model, with its real context window
+cp services/omp/extensions/tps-meter.ts ~/.omp/agent/extensions/   # optional: speed + cache share in the statusline
 ```
+
+The last line installs the *Statusline meter (omp and pi)*.
 
 Then put the settings below in your `~/.omp/agent/config.yml` — `omp-setup.sh`
 never touches that file.
@@ -178,9 +181,6 @@ modelRoles:
 
 defaultThinkingLevel: low  # requests no role covers
 
-enabledModels:
-  - club/*  # start on a club model or not at all
-
 task:
   maxConcurrency: 2  # subagents at once — see "Which slug to serve"
 
@@ -209,10 +209,16 @@ retry:
 ⚠️ **Set `modelRoles` even if you change nothing else.** Without roles, omp picks a
 model on its own from everything the gateway lists, and a route you can't use
 can win — a contributor's empty `modelRoles` landed on a keyless cloud route and
-got a 401. Roles alone don't cover a model that isn't up when omp starts — that is
-what `enabledModels` is for (see the table). The ThinkingCap slugs serve
-`thinkingcap38-27b`, not `qwen3.8-27b`: there, use `club/thinkingcap38-27b:<effort>`
-in the roles.
+got a 401. The ThinkingCap slugs serve `thinkingcap38-27b`, not `qwen3.8-27b`:
+there, use `club/thinkingcap38-27b:<effort>` in the roles.
+
+⚠️ **Start the slug before omp.** If the default role's model isn't being served
+when omp starts, omp picks a model itself from *any* provider you hold a key for,
+without asking — with only `OPENROUTER_API_KEY` set it started on
+`openrouter/openai/gpt-5.5`, a paid model. Check the model omp shows before your
+first prompt, or launch with `omp --model club/qwen3.8-27b`: that exits with an
+error when the model isn't served ("Set an API key environment variable…" — it
+means the model isn't up) and sends nothing.
 
 Rather leave your `config.yml` alone? The same settings ship as an overlay you
 load per run: `omp --config services/omp/omp-club.yml` (e.g. as an `omp-club`
@@ -224,7 +230,6 @@ What each setting is for:
 |---|---|
 | explicit effort on every role (`default: …:medium`, `task`/`smol`/`tiny`/`commit`: `…:low`, `plan`/`slow`: `…:xhigh`) | the role, not whichever slug is serving, decides how long the model thinks (club composes default to `low`; the checkpoint's own default is **xhigh**). On the vLLM dual-fast slug, two hard prompts took **10,395 / 16,000 (capped)** completion tokens at xhigh vs **5,916 / 7,280** at low and **4,474 / 6,455** at medium. |
 | `maxTokens: 32768` (the gateway's value, pinned by the provider) | the reply cap covers thinking *and* the answer — xhigh alone spent up to 16,000 tokens on one hard prompt, so a small cap cuts a file write off mid-file. |
-| `enabledModels: [club/*]` | if the model a role names isn't being served when omp starts, omp picks a model itself from *any* provider you hold a key for — with only `OPENROUTER_API_KEY` set it started on `openrouter/openai/gpt-5.5`, a paid model. With the list it exits with an error instead ("Set an API key environment variable…" — it means no club model is up). It is also omp's model scope when you switch models; a pattern you add there becomes a startup candidate too. |
 | `provider.appendOnlyContext: on` | anything that rewrites the front of the prompt re-prefills the whole conversation. |
 | `compaction.thresholdPercent: 80` | compaction swaps history for a summary and busts the cached prefix, so it should happen late. A percentage follows each slug's real window; the article's `thresholdTokens: 200000` would sit past the end of the 147K and 163K slugs' windows. |
 | `tools.artifactSpillThreshold: 10` (KB) | inlined 40K-character tool results are prefill on every later turn. |
@@ -304,9 +309,42 @@ Before relying on it:
 - It covers an *unreachable* model, not a *stuck* one: omp only falls back on
   failed requests, never because a task is hard.
 - It covers turns in a running session, not startup. If no club model is up when
-  omp starts, the chain never runs; `enabledModels: [club/*]` (in the block above)
-  makes omp stop with an error then, rather than start on a paid model.
+  omp starts, the chain never runs and omp picks a model itself — see *Start the
+  slug before omp* above.
 - Opt out with `retry.modelFallback: false`, or leave the `retry` block out.
+
+## Statusline meter (omp and pi)
+
+An extension that shows the model's decode speed and how much of each prompt the
+engine served from its prefix cache, after every reply, for the request and for
+the session:
+
+```
+⚡ 66.3 tok/s · ttft 0.3s · out 131 · think 29 · cache 98% of 7.8K · Σ 66.1 tok/s · Σ cache 95% (n=12)
+```
+
+```bash
+cp services/omp/extensions/tps-meter.ts ~/.omp/agent/extensions/   # omp
+cp services/pi/extensions/tps-meter.ts  ~/.pi/agent/extensions/    # pi
+```
+
+The two files are the same program (only the package their type import names
+differs; `test-agent-statusline-meter` keeps them in step). It loads with the next
+session and needs nothing else — it reads the usage each reply already carries.
+
+| Field | Meaning |
+|---|---|
+| `⚡ 66.3 tok/s` | decode speed of this reply: output tokens over the time from the first generated token to the end, so prefill is left out |
+| `ttft 0.3s` | request start to first generated token (thinking or text) — prefill plus queueing |
+| `out 131` · `think 29` | output tokens, and the reasoning tokens the provider reported (left out when it reports none) |
+| `cache 98% of 7.8K` | share of this request's 7.8K-token prompt taken from the prefix cache: `cacheRead / (input + cacheRead + cacheWrite)` (both agents count only the *uncached* part as `input`) |
+| `Σ … tok/s` · `Σ cache 95%` · `(n=12)` | the same over the session on this model; it resets when you switch models. `Σ cache` is the number to watch — 90 %+ past the first turns; a drop means something rewrote the front of the prompt (see *Prefix caching — what breaks it*) |
+
+Cache figures appear only once the backend has reported a cache hit for the
+model — a backend that reports no cached tokens would otherwise read as a false
+0 %. While a reply streams, the status shows elapsed time and phase instead.
+`scripts/cache-share.sh` reads the same share from the engine's own counters
+(*Troubleshooting a session*).
 
 ## Which slug to serve for agent work
 
@@ -356,15 +394,24 @@ token from the start. Verified on this stack:
 
 ## Claude Code
 
+⚠️ **Works on the SGLang slugs only, for now.** On the vLLM Qwen3.8 slugs, Claude
+Code's first request fails with `400 … System message must be at the beginning`.
+Claude Code (2.1.x) sends its `# Environment` block as a `system` message after the
+first user turn; LiteLLM forwards it where it is, and the Qwen3.8 template refuses
+a system message that isn't first. SGLang's request handling lets it through.
+Tracked in [#1447](https://github.com/noonghunna/club-3090/discussions/1447).
+
 Claude Code talks to the same gateway through LiteLLM's Anthropic-compatible
-`/v1/messages` endpoint. In `~/.claude/settings.json`:
+`/v1/messages` endpoint, which LiteLLM translates for the engine. In
+`~/.claude/settings.json`:
 
 ```json
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",
     "ANTHROPIC_API_KEY": "sk-litellm-master-key",
-    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144"
   },
   "model": "qwen3.8-27b"
 }
@@ -375,13 +422,26 @@ Claude Code talks to the same gateway through LiteLLM's Anthropic-compatible
 - With discovery on, Claude Code lists every route the gateway serves. `model` must
   be a served id: `qwen3.8-27b` on every Qwen3.8 slug, `thinkingcap38-27b` on the
   ThinkingCap ones.
+- `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is the serving slug's context window — the
+  route's `max_input_tokens` (see *What the gateway sets*); 262144 on the dual-fast
+  slugs. Claude Code doesn't know the model, assumes 200K otherwise and compacts
+  against that. Lower it when you serve a smaller slug, or a long session runs past
+  the window.
+- `400 No connected db.` on every request means the key Claude Code sends isn't
+  the gateway's `LITELLM_MASTER_KEY`: LiteLLM looks an unknown key up in a
+  database the gateway doesn't have. Fix the key rather than removing the master
+  key — the gateway listens on every interface, so without one anyone on your
+  network can use it.
 
-Checked through the gateway on the reference rig (`sgl/qwen38-27b-dual-fast`): a
-`/v1/messages` request with tools came back as a `tool_use` block, and a
-`thinking.budget_tokens` request reached the model as a different reasoning effort
-(283 prompt tokens vs 309 at the server's default). The model's reasoning is
-**not** returned as thinking blocks on this path — only the answer and tool calls.
-A contributor runs Claude Code this way day to day (#1419).
+Checked on the reference rig with the Claude Code CLI (2.1.283) through the
+gateway: on `sgl/qwen38-27b-dual-fast` a multi-turn session with tool calls (find
+three files, read each, answer) finished in 17 s; on `vllm/qwen38-27b-dual-fast`
+the first request failed as above. With hand-built `/v1/messages` requests on the
+SGLang slug, a `thinking.budget_tokens` request reached the model as a different
+reasoning effort (283 prompt tokens vs 309 at the server's default). Past-turn
+thinking blocks do reach the model on both engines (the prompt grows by the
+block's size), but the model's reasoning is **not** returned as thinking blocks on
+this path — only the answer and tool calls.
 
 Two differences from omp: there is no counterpart to omp's key-gated cloud
 fallback — if the local model can't be reached, the request fails — and a slug
@@ -424,24 +484,7 @@ subagent's system prompt), and omp's small title calls (~340 tokens) were never
 reused. vLLM and SGLang report the share split into the GPU cache and the
 host-RAM tier (`KV_OFFLOAD_GB`); llama.cpp has no cached-token counter.
 
-**The same numbers in your agent's statusline.** A small extension shows decode
-speed and prompt-cache share after every reply, per request and for the session:
-
-```
-⚡ 66.3 tok/s · ttft 0.3s · out 131 · think 29 · cache 98% of 7.8K · Σ 66.1 tok/s · Σ cache 95% (n=12)
-```
-
-```bash
-cp services/omp/extensions/tps-meter.ts ~/.omp/agent/extensions/   # omp
-cp services/pi/extensions/tps-meter.ts  ~/.pi/agent/extensions/    # pi — same program
-```
-
-It loads with the next session. `cache 98% of 7.8K` is how much of this request's
-prompt came from the cache (`cacheRead / (input + cacheRead + cacheWrite)` — both
-agents count only the *uncached* part as `input`); `Σ cache` is the whole session
-on this model, the number to watch. Cache figures appear only once the backend has
-reported a cache hit: an engine that doesn't report cached tokens would otherwise
-read as a false 0 %.
+**The same numbers in your agent's statusline:** see *Statusline meter (omp and pi)*.
 
 **What did the gateway actually send?** Request logging on the LiteLLM gateway is
 **off by default** — one access line per request, no content. To see each request
@@ -471,6 +514,8 @@ bash scripts/litellm-log.sh status
 - **An engine that stops without `switch.sh`** (a crash, a plain `docker stop`)
   stays advertised until the next sync; requests fail with a clean HTTP error.
   Re-sync with `bash scripts/lib/litellm-sync.sh`.
+- **Claude Code on the vLLM slugs** fails on its first request — see *Claude Code*
+  ([#1447](https://github.com/noonghunna/club-3090/discussions/1447)).
 - **`qwen3_coder` tool parser** drops everything after a literal `<tool_call>` in
   a reply's prose ([#1191](https://github.com/noonghunna/club-3090/issues/1191)) —
   rare in practice, but agents that *talk about* tool calling can hit it.
@@ -498,7 +543,7 @@ Where this setup differs, and why:
 |---|---|---|
 | Thinking budget | `thinking_token_budget` via the provider's `extraBody` | Doesn't reach the engine through the gateway: omp talks the Responses API to `openai/` routes, and vLLM accepts the budget only on chat completions. Effort per role is the lever. |
 | Compaction | `thresholdTokens: 200000` (on a 262K window) | `thresholdPercent: 80` — follows each slug's window, which runs from 65K to 262K here. |
-| Fallback | between the author's two local machines | `club/*` → OpenRouter's free Qwen3.8-27B, then `openrouter/free` — only with `OPENROUTER_API_KEY` set. `enabledModels: [club/*]` keeps omp from *starting* on a cloud model. |
+| Fallback | between the author's two local machines | `club/*` → OpenRouter's free Qwen3.8-27B, then `openrouter/free` — only with `OPENROUTER_API_KEY` set. |
 | Subagents | `task.maxConcurrency: 4` | 2 — vLLM dual-fast runs 8 sequences, SGLang dual-fast 2; see *Which slug to serve*. |
 | Tool-schema key order | template fix `tojson(sort_keys=True)` | Shipped in the Qwen3.8 template (#1441). |
 | Host-RAM KV tier on hybrid models | served ~1.5 % of what was asked | Revisits of evicted agent sessions took 7.7 s (SGLang) / 8.6 s (vLLM) vs ~42 s cold (#1419). |
