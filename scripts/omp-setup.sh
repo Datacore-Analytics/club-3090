@@ -55,10 +55,19 @@ END = "  # <<< club-3090 local models <<<"
 # Qwen3.8 slugs all serve the shared id `qwen3.8-27b`; the ThinkingCap slugs are
 # replicas that serve their OWN name `thinkingcap38-27b` on every tier (fast /
 # max / superfast, vLLM and SGLang).
-QWEN38_IDS = ["qwen3.8-27b", "thinkingcap38-27b"]
+# The FP8 tiers also serve a `-fp8` alias, and the gateway lists every alias as its
+# own route, so each needs the override too. test-omp-setup checks this list
+# against every name the Qwen3.8-family composes serve.
+QWEN38_IDS = ["qwen3.8-27b", "qwen3.8-27b-fp8", "thinkingcap38-27b", "thinkingcap38-27b-fp8"]
 
 def qwen38_override(mid: str) -> str:
     return f"""      {mid}:
+        # Reply cap (thinking + answer). The gateway reports it per route, but when
+        # it can't (routes rendered before model_info existed, or an engine that
+        # reports no context) omp falls back to its catalog's 65,536 — the WHOLE
+        # window of the 65K single-card slug. Pinned here, it wins over discovery;
+        # 32768 is at most half the window on every Qwen3.8 slug.
+        maxTokens: 32768
         # A thinking model on every engine. Stated here because the gateway only
         # says so for slugs that declare a thinking sampler profile; without it omp
         # treats the model as non-reasoning and never sends an effort at all.
@@ -143,9 +152,12 @@ Next:
   1. Serve a model:   bash scripts/switch.sh --force vllm/qwen38-27b-dual-fast   (experimental; the slug docs/CODING_AGENTS.md recommends for agents)
   2. Check omp sees it with its real context window:
                       omp models club
-  3. Run omp with the local-GPU settings overlay:
+  3. Add the local-GPU settings — this script never touches your config.yml:
+     paste the block from docs/CODING_AGENTS.md ("Settings for ~/.omp/agent/config.yml")
+     into ~/.omp/agent/config.yml, or load them per run:
                       omp --config "$ROOT_DIR/services/omp/omp-club.yml"
-     (or: alias omp-club='omp --config "$ROOT_DIR/services/omp/omp-club.yml"')
+     ⚠️ Set modelRoles either way: with none, omp picks a model on its own from every
+     gateway route, and a route you can't use can win.
 
   Always write models as club/<id> — a bare id can fuzzy-match a cloud provider.
   Scripted:  omp -p --model club/qwen3.8-27b --thinking low "..." </dev/null

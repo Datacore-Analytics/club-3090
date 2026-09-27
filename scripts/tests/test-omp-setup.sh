@@ -36,6 +36,10 @@ bash "$ROOT/scripts/omp-setup.sh" >/dev/null || bad "fresh run failed"
 [ "$(yq providers/club/baseUrl)" = "http://127.0.0.1:4000/v1" ] || bad "club baseUrl must be the gateway (:4000/v1)"
 [ "$(yq providers/club/modelOverrides/qwen3.8-27b/compat/qwenTemplateReasoningEffort)" = "True" ] \
   || bad "qwen3.8-27b override must set qwenTemplateReasoningEffort"
+# The reply cap must not depend on the gateway reporting it: without model_info omp
+# falls back to its catalog's 65,536, the whole window of the 65K single-card slug.
+[ "$(yq providers/club/modelOverrides/qwen3.8-27b/maxTokens)" = "32768" ] \
+  || bad "qwen3.8-27b override must pin maxTokens: 32768 (got '$(yq providers/club/modelOverrides/qwen3.8-27b/maxTokens)')"
 # `qwen` would send a top-level enable_thinking that vLLM and SGLang ignore, so omp's
 # "off" level would keep thinking on; chat_template_kwargs is what the engines read.
 [ "$(yq providers/club/compat/thinkingFormat)" = "qwen-chat-template" ] \
@@ -85,5 +89,56 @@ need = [d["provider"]["appendOnlyContext"] == "on", d["compaction"]["thresholdPe
 sys.exit(0 if all(need) else 1)
 PY
 
-[ "$fail" -eq 0 ] && echo "test-omp-setup: ok (print-only, create, append beside other providers, idempotent refresh, refuses a hand-written club, overlay)"
+# 8. the override keys are EXACTLY the ids the Qwen3.8-family composes serve —
+#    the registry's model name is not what omp sees; the engine's /v1/models (and
+#    so the gateway) says --served-model-name / --alias. A key nothing serves is
+#    dead; a served id with no key gets no effort (#1444: ThinkingCap's key was
+#    `thinkingcap-qwen3.8-27b` while every ThinkingCap compose served thinkingcap38-27b).
+python3 - "$ROOT" <<'PY' || bad "omp-setup.sh QWEN38_IDS must equal the ids the Qwen3.8-family composes serve"
+import ast, glob, io, re, sys
+root = sys.argv[1]
+src = io.open(f"{root}/scripts/omp-setup.sh", encoding="utf-8").read()
+keys = set(ast.literal_eval(re.search(r"^QWEN38_IDS = (\[.*\])$", src, re.M).group(1)))
+served = set()
+def add(tok):
+    m = re.fullmatch(r"\$\{\w+:-([^}]+)\}", tok)          # ${SERVED_NAME:-qwen3.8-27b} -> its default
+    if m: tok = m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9][\w.\-]*", tok): served.add(tok)
+for d in ("qwen3.8-27b", "thinkingcap-qwen3.8-27b"):
+    for f in glob.glob(f"{root}/models/{d}/*/compose/*/*/*.yml"):
+        lines = [l for l in io.open(f, encoding="utf-8").read().splitlines() if not l.lstrip().startswith("#")]
+        for i, l in enumerate(lines):
+            m = re.search(r"--(?:served-model-name|alias)\b(.*)$", l)
+            if not m: continue
+            rest = m.group(1).strip().rstrip("\\").strip().strip('"')
+            if rest and not rest.startswith("-"):                    # one-line form
+                for tok in rest.split():
+                    add(tok.strip('"'))
+                continue
+            for nxt in lines[i + 1:]:                                # YAML list form
+                v = nxt.strip()
+                if not v.startswith("- ") or v[2:].lstrip().startswith("-"): break
+                add(v[2:].strip().strip("\"'"))
+if not served:
+    sys.exit("found no served names — the scan itself is broken")
+if keys != served:
+    print(f"  served but no override: {sorted(served - keys)}   override nothing serves: {sorted(keys - served)}", file=sys.stderr)
+    sys.exit(1)
+PY
+
+# 7. the config.yml block the doc tells readers to paste == the overlay we ship
+python3 - "$ROOT/docs/CODING_AGENTS.md" "$ROOT/services/omp/omp-club.yml" <<'PY' || bad "docs/CODING_AGENTS.md's config.yml block and services/omp/omp-club.yml have drifted apart"
+import io, re, sys, yaml
+doc = io.open(sys.argv[1], encoding="utf-8").read()
+sec = doc.split("### Settings for `~/.omp/agent/config.yml`", 1)[1]
+block = yaml.safe_load(re.search(r"```yaml\n(.*?)```", sec, re.S).group(1))
+overlay = yaml.safe_load(io.open(sys.argv[2], encoding="utf-8"))
+if block != overlay:
+    for k in sorted(set(block) | set(overlay)):
+        if block.get(k) != overlay.get(k):
+            print(f"  {k}: doc={block.get(k)!r} overlay={overlay.get(k)!r}", file=sys.stderr)
+    sys.exit(1)
+PY
+
+[ "$fail" -eq 0 ] && echo "test-omp-setup: ok (print-only, create, append beside other providers, idempotent refresh, refuses a hand-written club, overlay, doc block == overlay, override keys == served ids)"
 exit "$fail"
