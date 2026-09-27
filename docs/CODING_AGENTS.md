@@ -236,15 +236,36 @@ token from the start. Verified on this stack:
 
 ## Claude Code
 
-A contributor runs Claude Code against the same gateway through its Anthropic-compatible `/v1/messages` endpoint (not re-verified on the reference rig):
+Claude Code talks to the same gateway through LiteLLM's Anthropic-compatible
+`/v1/messages` endpoint. In `~/.claude/settings.json`:
 
 ```json
-"env": {
-  "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",
-  "ANTHROPIC_API_KEY": "sk-litellm-master-key",
-  "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",
+    "ANTHROPIC_API_KEY": "sk-litellm-master-key",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
+  },
+  "model": "qwen3.8-27b"
 }
 ```
+
+- `ANTHROPIC_BASE_URL` is the gateway itself (no `/v1`), never an engine port; the
+  key is the gateway compose's `LITELLM_MASTER_KEY`.
+- With discovery on, Claude Code lists every route the gateway serves. `model` must
+  be a served id: `qwen3.8-27b` on every Qwen3.8 slug, `thinkingcap38-27b` on the
+  ThinkingCap ones.
+
+Checked through the gateway on the reference rig (`sgl/qwen38-27b-dual-fast`): a
+`/v1/messages` request with tools came back as a `tool_use` block, and a
+`thinking.budget_tokens` request reached the model as a different reasoning effort
+(283 prompt tokens vs 309 at the server's default). The model's reasoning is
+**not** returned as thinking blocks on this path — only the answer and tool calls.
+A contributor runs Claude Code this way day to day (#1419).
+
+Two differences from omp: there is no counterpart to omp's key-gated cloud
+fallback — if the local model can't be reached, the request fails — and a slug
+switch restarts the gateway (see *Known limits*), so switch between turns.
 
 ## Troubleshooting a session
 
