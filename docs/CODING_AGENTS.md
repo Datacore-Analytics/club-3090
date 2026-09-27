@@ -9,6 +9,21 @@ always sees the live model — no config edit when you switch slugs.
 omp / pi / hermes / claude ──► LiteLLM :4000 ──► whichever slug switch.sh booted (:8113, :8142, …)
 ```
 
+## Cautions — read before you start
+
+Each of these can cost money, send your code off this machine, or leave the gateway
+open. The detail is in the section named in the last column.
+
+| What can happen | When | Avoid it |
+|---|---|---|
+| omp starts on a **paid cloud model** | no club model is being served when omp starts, and you hold a key for another provider — with only `OPENROUTER_API_KEY` set it picked `openrouter/openai/gpt-5.5` | Start the slug first, or launch `omp --model club/qwen3.8-27b`, which exits instead of choosing a model (*Start the slug before omp*, under *Settings for `~/.omp/agent/config.yml`*) |
+| omp picks a route **you can't use** | `modelRoles` left empty | Set `modelRoles` (*Settings for `~/.omp/agent/config.yml`*) |
+| **Prompts and code leave the machine** | omp's OpenRouter fallback fires — only with `OPENROUTER_API_KEY` set | Leave the `retry` block out, or set `retry.modelFallback: false` (*Cloud fallback to OpenRouter's free models*) |
+| Hermes **resumes on your default model**, which may be a cloud one | `hermes chat --resume <id>` without a provider | Repeat `--provider custom:club -m qwen3.8-27b` (*Hermes Agent — setup*) |
+| Hermes tools **reach outside the machine**, or `computer_use` **drives your desktop** | Hermes's default toolsets (`web`, `browser`, `x_search`, `image_gen`, `tts`, `connections`, `computer_use`) | Name a local set with `-t` (*Hermes Agent — setup*) |
+| **Full prompts and replies in the gateway's log** | request logging is on (`scripts/litellm-log.sh on`) | Turn it off when done; `gpu-mode status` warns while it's on (*Troubleshooting a session*) |
+| **Anyone on your network can use the gateway**, including the cloud routes in your `config.local.yaml` | the master key is removed — the gateway listens on every interface (`4000:4000`) | Keep `LITELLM_MASTER_KEY`. `400 No connected db.` means the client's key is wrong: fix the key, not the gateway (*Claude Code*) |
+
 ## What the gateway sets
 
 The gateway serves `services/litellm/config.runtime.yaml` (gitignored), which
