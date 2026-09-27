@@ -437,9 +437,16 @@ providers:
   thinking off, `low` / `medium` / `xhigh` are the real rungs, `high` and `max` run
   as `xhigh`, and `minimal` as `low` — Hermes's own `ultra` goes out as `max`
   (`minimal` and `max` from #1458 on; before it they 400'd).
-- It sends no reply cap to a custom endpoint, so the server's default applies, and
-  it does not send earlier reasoning back — the prompt still grows append-only, so
-  the prefix cache holds.
+- It sends no reply cap to a custom endpoint, so the server's default applies.
+- **Turn on `model.reasoning_echo`** (`hermes config set model.reasoning_echo true`).
+  By default Hermes drops the model's earlier reasoning from the history it sends,
+  so inside a tool loop the model sees its past tool calls but not the plan behind
+  them; with it on, each assistant turn carries its `reasoning_content` (checked on
+  the wire), which the Qwen3.8 template renders — the same as omp and pi do. The
+  cost: each turn's reasoning is prefilled once on the next request; the prompt stays
+  append-only, so the prefix cache holds either way. It is global to Hermes's `model:`
+  block, and strict providers (Mistral, Groq, Cerebras, SambaNova) reject the field —
+  turn it off before making one of those your main model.
 - At startup it probes `/api/v1/models`, `/api/tags` and `/v1/props` for a context
   window; the gateway answers 404 to each, which is harmless — the window comes from
   the config.
