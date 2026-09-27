@@ -446,13 +446,42 @@ providers:
 - A fresh Hermes home installs its runtime (browser tools and more, ~2 GB) on the
   first `hermes` command, `hermes config set` included — run Hermes once before the
   script.
+- **`--resume` doesn't keep the session's provider.** A resumed session runs on your
+  *default* model, so repeat the provider unless club is your default:
+  `hermes chat --resume <id> --provider custom:club -m qwen3.8-27b`.
+- **One-shot runs cap subagents.** `hermes chat -q` / `--oneshot` may spawn at most
+  `delegation.oneshot_max_children` subagents in total (default 2); ask for more and
+  Hermes refuses the whole batch, and the model does the work itself. Interactive
+  sessions run up to `delegation.max_concurrent_children` (default 10) at once — more
+  than the slug has sequences for queue (see *Which slug to serve*).
 
-Checked through the gateway on the reference rig (Hermes Agent 0.21.5): on
-`vllm/qwen38-27b-dual-fast` a task with tool calls (read three files) answered in
-14 s, and a resumed follow-up (`hermes chat --resume <id>`) in 4 s with 97 % of its
-prompt served from the prefix cache; on `sgl/qwen38-27b-dual-fast` a two-file task
-took a 16 s session (3 tool calls, every request 200). Hermes's system prompt with
-its 33 tools is about 14.5K tokens.
+**Tools.** Which tools the model gets comes from your Hermes toolsets
+(`hermes tools list`), not from the `club` provider — the same set as for any model.
+Some reach outside the machine even though the model runs locally (`web`, `browser`,
+`x_search`, `image_gen`, `tts`, `connections`), and `computer_use` drives your
+desktop. For a run that stays on this machine, name a local set:
+
+```bash
+hermes chat --provider custom:club -m qwen3.8-27b \
+    -t terminal,file,code_execution,todo,memory,session_search,skills,clarify,delegation
+```
+
+**Speed and cache share are built into Hermes's status bar** — `cache_hit` and `tps`,
+shown by default on a wide terminal (`display.status_bar.fields`) — so the omp/pi
+meter isn't needed here. `cache_hit` works through the gateway: Hermes records the
+engine's cached-token count exactly. `tps` is output tokens over the whole call time,
+prefill included, so with Hermes's long prompts it reads well below the decode speed.
+
+Checked through the gateway on the reference rig (Hermes Agent 0.21.5):
+
+| Check | Result |
+|---|---|
+| Tool calls | `search_files` → `read_file` → `write_file` → `terminal` ×2 (write a script, run it, append to a file), results verified on disk — 29 s on sgl dual-fast |
+| Prefix cache across resumed turns | 98 % of the prompt from cache on sgl dual-fast, for a plain turn and for one with a tool loop; 97 % on vllm dual-fast |
+| Subagents | `delegate_task`, two children in parallel: both completed on `qwen3.8-27b`, every gateway request 200 — 22 s on sgl dual-fast |
+| Tool task on vllm dual-fast | three files read and joined in 14 s; resumed follow-up in 4 s |
+
+Hermes's system prompt with its default 33 tools is about 14.5K tokens.
 
 ## Statusline meter (omp and pi)
 
