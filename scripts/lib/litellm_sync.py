@@ -26,9 +26,14 @@ import sys
 import urllib.error
 import urllib.request
 
+try:                                    # run as a file from scripts/lib (litellm-sync.sh)
+    import litellm_local
+except ImportError:                     # imported as scripts.lib.litellm_sync
+    from scripts.lib import litellm_local
+
 BEGIN = "  # === BEGIN GENERATED LOCAL BLOCK"
 END = "  # === END GENERATED LOCAL BLOCK ==="
-LOCAL_BEGIN = "  # === BEGIN THIS RIG'S OWN ROUTES — services/litellm/config.local.yaml (not tracked) ==="
+LOCAL_BEGIN = "  # === BEGIN THIS RIG'S OWN ROUTES — {src} (not tracked) ==="
 LOCAL_END = "  # === END THIS RIG'S OWN ROUTES ==="
 
 
@@ -312,15 +317,17 @@ def prune(text: str, reg_ports: set[str], live_ports: set[str]) -> str:
 
 
 def local_routes(root: str) -> str:
-    """This rig's own routes — cloud endpoints, private services — from the
-    gitignored services/litellm/config.local.yaml, so they never go into the
-    tracked catalog. Its `model_list:` entries are copied VERBATIM (comments kept;
-    stdlib only, like the rest of the switch path) and re-indented to match the
-    catalog. They are not on registry ports, so the prune never touches them.
-    Returns '' when there is no file or it lists no routes."""
-    path = os.environ.get("C3_LITELLM_LOCAL_CONFIG") or os.path.join(root, "services/litellm/config.local.yaml")
-    if not os.path.isfile(path):
+    """This rig's own routes — cloud endpoints, private services — so they never go
+    into the tracked catalog: litellm/config.local.yaml in the club-3090 config dir,
+    else (an older install) the checkout's gitignored services/litellm/
+    config.local.yaml — see litellm_local.py. Its `model_list:` entries are copied
+    VERBATIM (comments kept; stdlib only, like the rest of the switch path) and
+    re-indented to match the catalog. They are not on registry ports, so the prune
+    never touches them. Returns '' when there is no file or it lists no routes."""
+    found, _origin = litellm_local.active_routes(root)
+    if found is None or not found.is_file():
         return ""
+    path = str(found)
     body, inside = [], False
     for ln in io.open(path, encoding="utf-8").read().splitlines():
         top = bool(ln) and not ln[0].isspace() and not ln.startswith("#") and not ln.startswith("-")
@@ -342,7 +349,8 @@ def local_routes(root: str) -> str:
             fixed.append(" " * shift + ln)
         else:
             fixed.append(ln[min(-shift, len(ln) - len(ln.lstrip())):])
-    return LOCAL_BEGIN + "\n" + "\n".join(fixed).strip("\n") + "\n" + LOCAL_END + "\n"
+    return (LOCAL_BEGIN.format(src=litellm_local.display_path(found, root)) + "\n"
+            + "\n".join(fixed).strip("\n") + "\n" + LOCAL_END + "\n")
 
 
 def mounted_runtime_path() -> "str | None":
@@ -359,6 +367,23 @@ def mounted_runtime_path() -> "str | None":
     return path if out.returncode == 0 and path else None
 
 
+def gateway_env_names(container: str = "litellm") -> "set[str] | None":
+    """The variable NAMES in the gateway container's environment. docker's own
+    template drops the values, so none leaves docker. None when there is no such
+    container or docker can't be asked."""
+    try:
+        out = subprocess.run(
+            ["docker", "inspect", container, "--format",
+             '{{range .Config.Env}}{{index (split . "=") 0}}{{"\\n"}}{{end}}'],
+            capture_output=True, text=True, encoding="utf-8", timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return {ln.strip() for ln in out.stdout.splitlines() if ln.strip()}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
@@ -370,6 +395,11 @@ def main() -> int:
     def log(msg: str) -> None:
         if not a.quiet:
             print(f"[litellm-sync] {msg}")
+
+    # Routes or keys still read from the checkout: say so (every run unless
+    # --quiet; quiet — switch.sh, gpu-mode — only once). Never on a --check.
+    if not a.check:
+        litellm_local.notice(a.root, quiet=a.quiet)
 
     template = os.path.join(a.root, "services/litellm/config.yaml")
     runtime = os.path.join(a.root, "services/litellm/config.runtime.yaml")
@@ -411,6 +441,17 @@ def main() -> int:
             return 0
         log("runtime config is STALE — run: bash scripts/lib/litellm-sync.sh")
         return 1
+
+    # A route whose saved key the running gateway was created without (a new route,
+    # or a key saved since): the restart below can't add it, only a recreate can.
+    # Skipped under --no-restart (the caller is about to start the gateway itself,
+    # with its keys) and under the test seam.
+    if not a.no_restart and os.environ.get("C3_LITELLM_FAKE_LIVE") is None:
+        names = gateway_env_names()
+        missing = litellm_local.keys_missing_from_gateway(a.root, names) if names is not None else []
+        if missing:
+            print(f"[litellm-sync] WARN: the running gateway has no {', '.join(missing)}, which your routes use. "
+                  "A restart can't add it; recreate the gateway: bash scripts/gpu-mode.sh gateway", file=sys.stderr)
 
     if cur == out:
         log(f"no change ({n_routes} live route(s))")
