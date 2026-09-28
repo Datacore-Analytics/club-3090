@@ -197,6 +197,7 @@ A driver grant does **not** mean your engine uses it. Each engine has its own sw
 | ↳ vLLM **custom all-reduce kernel** (rides on the transport) | ON with the transport at ≤2 GPUs; vLLM vetoes it itself above 2 PCIe-only GPUs (#786) | — | **`DISABLE_CUSTOM_ALL_REDUCE=1`** — drops the kernel, **keeps** the transport |
 | **llama.cpp** | ⚠️ **OFF** — opt-in regardless of the grant | `GGML_CUDA_P2P=1` **and** `--split-mode row`/`tensor` | unset `GGML_CUDA_P2P` |
 | **SGLang** | **used automatically on a grant** — no interconnect detection; NCCL picks the peer path itself (measured on the reference rig, 2026-09-28) | nothing to do | `NCCL_P2P_DISABLE=1` (in `.env` or on the command line) — every multi-GPU SGLang compose forwards it; `test-compose-sglang-nccl-p2p-knob` keeps it that way |
+| ↳ SGLang **custom all-reduce kernel** | **OFF** — every SGLang compose passes `--disable-custom-all-reduce`. Over PCIe SGLang can only run its V1 kernel (V2 needs full NVLink) | not offered: on the reference rig it ran cleanly but gained nothing measurable (§6) | — |
 
 > ⭐ **Transport and kernel are two switches.** `NVLINK_MODE=force_off` turns off *both* — it discards the NCCL prefill win along with the kernel that is usually the actual problem ([#922](https://github.com/noonghunna/club-3090/issues/922), [#1332](https://github.com/noonghunna/club-3090/issues/1332)). `DISABLE_CUSTOM_ALL_REDUCE=1` is the narrow one:
 >
@@ -889,7 +890,7 @@ NVLINK_MODE=pcie_p2p
 
 > **Which composes auto-detect, and which don't.** All **24 multi-GPU vLLM composes** source `detect_nvlink.sh` from their own entrypoint, so auto-enable happens **in-container on every boot — `launch.sh`/`switch.sh` and a raw `docker compose up` alike**. The trigger is *only* `nvidia-smi topo -p2p r` reporting `OK` on every pair: it does not inspect your topology, ACS, IOMMU or BAR1, which is why a driver that grants peer access it can't deliver takes you straight to the §8 hang rather than to a slow path.
 >
-> The **llama.cpp-family** composes (`llama-cpp`, `ik-llama`, `beellama`) do no interconnect detection — they don't route peer traffic through NCCL, so there's nothing to toggle. The one **SGLang** dual compose (`eagle3-experimental`) also doesn't: it ships `--disable-custom-all-reduce` and `NCCL_P2P_DISABLE=1` deliberately, and P2P there is opt-in with `NCCL_P2P_DISABLE=0` (untested on a patched rig — report back if you try it).
+> The **llama.cpp-family** composes (`llama-cpp`, `ik-llama`, `beellama`) do no interconnect detection — they don't route peer traffic through NCCL, so there's nothing to toggle. The **SGLang** composes don't detect anything either, and all of them pass `--disable-custom-all-reduce`. The Qwen3.8 / ThinkingCap ones let NCCL use a grant by itself (`NCCL_P2P_DISABLE=1` turns it off; measured on the reference rig, 2026-09-28). The older Qwen3.6 `eagle3-experimental` still defaults to `NCCL_P2P_DISABLE=1`, so P2P there is opt-in with `NCCL_P2P_DISABLE=0` (untested on a patched rig — report back if you try it).
 
 ⚠️ **The flip side of auto-enable: installing the patched module changes launcher behavior by itself.** The next launch after the module is in place, `detect_nvlink.sh` sees the new `OK` grant and switches every dual/multi compose to the P2P path (`NCCL_P2P_LEVEL=PHB` + custom-all-reduce) with no config change on your side. A driver *grant* is not the same as *working transfers* — if the grant doesn't actually carry bytes (**the driver not using the patch's static full-VRAM BAR1 mapping** — what forcing it resolved in [#873](https://github.com/noonghunna/club-3090/issues/873) — patch branch not matching your exact driver version, or ACS/IOMMU redirecting peer TLPs), NCCL blocks forever on its first peer operation and **every vLLM slug hangs silently at `pynccl` init with weights never loading** (§8). The escape hatch is always `NVLINK_MODE=force_off` in `.env`. Before trusting a fresh grant, run the transfer check (§7, `VLLM_SKIP_P2P_CHECK=0`) or cuda-samples `p2pBandwidthLatencyTest` — both move real bytes; the topo matrix does not.
 
@@ -912,6 +913,7 @@ From cross-rig data on this stack. ⚠️ **The gain is strongly card-dependent*
 | **2× RTX 5090, P2P on-vs-off at fixed TP=2** (`qwen-35b-a3b-dual-nvfp4`, same slug, same sitting) | **decode +32.5% · prefill@90K +33.9%** (net, vs a pristine no-dwords system) — the isolated interconnect delta is **+36.9%**, of which ~3% is given back by the `NVreg` override the 50-series path requires. ⚠️ **Ratio is clean, absolutes are not** — that sitting's P2P-off baseline runs 17.7% below the same rig's own earlier measurement of the same slug (BENCHMARKS `⤷ P2P on-vs-off A/B`), so a cross-session read gives only ~+9%. Treat +32.5% as the interconnect delta, **not** as a promised upgrade gain | [#873](https://github.com/noonghunna/club-3090/issues/873) (@paulp83) |
 | **Dual 3090 TP=2 in a Proxmox VM, SGLang, patched P2P, custom AR off** — reporting rig ([#1453](https://github.com/noonghunna/club-3090/issues/1453)) | **prefill @10K +21.9% · @90K +16.3% · decode +6–7%** | §4a, one boot per arm |
 | **Same route, reference rig** (2× 3090, GPU1 x8) | **prefill @10K +34–59% · @90K +29–36% · decode inside boot noise** | §4a, ON→OFF→ON boots |
+| **Same rig, SGLang custom AR ON vs OFF** (P2P on in both arms, MTP n=4) | **decode +0.6% narrative / +1.8% code · prefill @10K +1.2% · @90K −0.3% — all inside boot noise** | reference rig 2026-09-28, A,B,A,B boots; the only boot ahead was the first, cold one |
 | NVLink hardware — workload-shaped (same-host A/B) | **decode +3–5% · prefill/long-ctx +35–49%** | [#698](https://github.com/noonghunna/club-3090/issues/698) — supersedes the flat ~+15% from [#77](https://github.com/noonghunna/club-3090/issues/77) (older v7.72.2 image) |
 
 **Translation — read the custom-AR column first.** The decode gains in this table come from **two different
@@ -928,6 +930,12 @@ mechanisms**, and they are not equally available:
   measure **+7.7% to +12.5% decode** with the kernel on (disc #903, disc #921). An earlier revision of this
   page said decode was "inside noise" without that qualifier — true only with the kernel forced off, and
   misleading for anyone running our stack.
+- **SGLang's custom all-reduce kernel** — not the same story. Over PCIe SGLang runs its V1 kernel (V2 needs
+  full NVLink). On the reference rig it was safe (bench, verify-full, `soak-test.sh --continuous`, no AER/Xid)
+  but added nothing measurable, so the SGLang composes keep it off and there is no switch for it. A local
+  compose that turns it on can check it really started: V1's only success sign is `Registering N cuda graph
+  addresses`, which `report.sh` and the bench card now read ([#1470](https://github.com/noonghunna/club-3090/pull/1470));
+  UUID-pinned GPUs no longer break its setup ([#1462](https://github.com/noonghunna/club-3090/issues/1462)).
 
 ⚠️ **Do not quote the +32.5% as an expected upgrade gain.** Its no-P2P baseline was low (17.7%), and a cross-session
 re-read put the honest figure nearer **+9%**. Quote it, if at all, as an upper bound from one Blackwell pair.
