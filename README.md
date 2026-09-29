@@ -48,6 +48,7 @@ bash scripts/settings.sh show   # your saved settings (model dir, default pins, 
 
 Settings you save (the weights dir, your default config) live in `~/.config/club-3090/`, shared by every
 checkout: [where settings live](docs/FAQ.md#where-are-my-settings-saved-and-how-do-i-change-one).
+Upgrading from before v0.12.0? [What moved, and how to move yours](https://github.com/noonghunna/club-3090/discussions/1501).
 
 Prefer a screen to the CLI? **`c3`** is a terminal cockpit for the same flow: browse the catalog,
 serve with one key, watch GPUs and containers, run health checks. Install it with
