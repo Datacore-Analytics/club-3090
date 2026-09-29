@@ -515,6 +515,7 @@ In **`~/.config/club-3090/`** (`$XDG_CONFIG_HOME/club-3090/` if you set `XDG_CON
 |---|---|---|
 | `club3090.env` | settings: `MODEL_DIR`, your pinned defaults (`CLUB3090_DEFAULT_<MODEL>`, `CLUB3090_THINKING_<MODEL>`), knobs such as `NVLINK_MODE` or `DISABLE_CUSTOM_ALL_REDUCE`, the AI Studio's `LANIP` / `COMFYUI_ROOT` / `COMFYUI_OUTPUT_DIR` / `STUDIO_DIRECTOR_DEVICE` | `settings.sh set`; `setup.sh` (the model-dir prompt, and the [WSL2 fix](#does-this-work-on-windows--wsl2)); `switch.sh --set-default`; c3's `[S]` Settings and `[T]`; the AI Studio setup |
 | `secrets.env` (mode 0600) | tokens and keys: `HF_TOKEN`, the gateway key `LITELLM_MASTER_KEY`, the keys your own gateway routes use | `settings.sh set` (a token- or key-like name goes here on its own); c3's `[S]` Settings (the HF token); `gateway-key.sh rotate` ([the gateway key](CODING_AGENTS.md#the-gateway-key)) |
+| `slugs.json` | settings for one slug (row 2 of the table below) | `switch.sh --set <slug>`; c3's Launch settings form (`E`) |
 | `litellm/config.local.yaml` | your own gateway routes: a cloud endpoint, a private service ([routes of your own](CODING_AGENTS.md#routes-of-your-own)) | you, starting from `services/litellm/config.local.yaml.example` |
 
 ```bash
@@ -530,11 +531,15 @@ bash scripts/settings.sh path                    # where the files are
 
 | | Source | Applies to |
 |---|---|---|
-| 1 | a variable set in your shell (`KV_TYPE=q5_0 bash scripts/switch.sh …`, or `export`ed) | that command, or that shell |
-| 2 | `club3090.env` | every launch |
-| 3 | `secrets.env` | every launch |
-| 4 | the repo-root `.env` (where settings used to live) | launches from that checkout |
-| 5 | the compose file's own default (`${VAR:-default}`) | — |
+| 1 | a variable set in your shell (`KV_TYPE=q5_0 bash scripts/switch.sh …`, or `export`ed), even an empty one | that command, or that shell |
+| 2 | the slug's own setting (`switch.sh --set <slug> KEY=VALUE`, saved in `slugs.json`) | that slug's launches through `switch.sh` (so `launch.sh` and c3 too) |
+| 3 | the model's thinking pin, `CLUB3090_THINKING_<MODEL>=on` or `off` (c3's `[T]`), which sets `ENABLE_THINKING` | that model's launches through `switch.sh` |
+| 4 | `club3090.env` | every launch |
+| 5 | `secrets.env` | every launch |
+| 6 | the repo-root `.env` (where settings used to live) | launches from that checkout |
+| 7 | the compose file's own default (`${VAR:-default}`) | — |
+
+- **Settings for one slug** (row 2): `bash scripts/switch.sh --set <slug> KEY=VALUE` saves one, `--unset <slug> KEY` removes it, and `--explain <slug>` shows every value with the row it came from. In c3, select the slug on the Catalog tab and press **`E`**. Only the launch knobs that slug's compose reads can be set this way (today `KV_OFFLOAD_GB`, `KV_OFFLOAD_DISK`, `KV_OFFLOAD_DISK_GB`, `ENABLE_THINKING`, `REASONING_EFFORT` and `SPEC_N`), and a bad value is refused before the running slug is stopped. An empty shell value turns a saved one off for a single launch: `KV_OFFLOAD_GB= bash scripts/switch.sh <slug>`. `gpu-mode`'s model modes run the compose directly, so rows 2 and 3 don't apply to them.
 
 - **A change applies at the next launch.** A running container keeps the values it started with.
 - **Values are taken literally.** `$HOME`, `${VAR}` and a leading `~` are not expanded, so write the full path; the launchers warn when a saved value contains one. `set` refuses a value that bash, docker compose and systemd would read differently (quotes, `$`, a backslash, ` #`).
