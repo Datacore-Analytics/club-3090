@@ -524,26 +524,25 @@ dual-fast):
 | Past reasoning | sent back as `reasoning_content` on every assistant turn |
 | Message roles | only `system`, `user`, `assistant`, `tool` — no 400 on vLLM |
 
-⚠️ **pi 1.0.0 ignores the thinking level it starts with.** `--thinking`, a `:level`
-suffix on `--model` and the saved default level all leave it sending
-`enable_thinking: true, reasoning_effort: "medium"`, so `--thinking off` still
-thinks. Setting the level inside the session works: checked through pi's RPC mode,
-which sets it the way `/thinking` does, `low` arrived as `reasoning_effort: "low"`
-and `off` as `enable_thinking: false`. pi 0.87.1 and 0.99.2 apply the starting
-level, so this is a 1.0.0 change; checked through the gateway on SGLang dual-fast,
-2026-10-02. Until it's fixed, set the level with `/thinking` after pi starts.
-
 Changing the thinking level in the middle of a session costs a full re-prefill —
 see *Prefix caching — what breaks it*.
 
-A pi package that routes turns by role (a role router such as
-`pi-fabric-role-router`) sends each turn to its roles' models and overrides
-`--model`. Point its roles at `club/qwen3.8-27b`, or start pi with
-`--no-extensions` and load the extensions you want with `-e`
-(`-e ~/.pi/agent/extensions/tps-meter.ts` for the meter).
+⚠️ **A role-router package overrides `--model` and the thinking level.** A pi
+package that routes turns by role (such as `pi-fabric-role-router`) sends each turn
+to its role's model, at that role's `thinking` level from its own config
+(`fabric-routing.json`). That level wins over `--thinking`, a `:level` suffix on
+`--model` and the saved default level. With the router's primary role at
+`thinking: medium`, `--thinking low` and `--thinking off` both went out as
+`reasoning_effort: "medium"`. Without the router, or with `--no-extensions`, `low`
+went out as `low` and `off` as `enable_thinking: false`. This was checked on pi
+1.0.0 and 0.99.2 with router 0.4.1, 2026-10-02. A level set inside the session
+(`/thinking`) still applies (checked over pi's RPC mode, which sets it the same
+way). To control thinking per run, set it per role in the router's config, use
+`/thinking`, or start pi with `--no-extensions` and load the extensions you want
+with `-e` (`-e ~/.pi/agent/extensions/tps-meter.ts` for the meter). Point the
+router's roles at `club/qwen3.8-27b`.
 
-Scripted runs (on pi 1.0.0 the `--thinking` flag has no effect and the run uses
-`medium`, see above):
+Scripted runs (a role router overrides `--thinking`, see above):
 
 ```bash
 pi -p --model club/qwen3.8-27b --thinking low "…" </dev/null
@@ -713,7 +712,7 @@ anything:
   `--override-generation-config`, and SGLang reads them from the checkpoint's
   `generation_config.json`. `presence_penalty` 0.0 is the engines' own default, so
   it comes out right as well.
-- **Thinking off** (omp `off`, pi `/thinking off`, Hermes Agent `/reasoning none`):
+- **Thinking off** (omp `off`, pi `off`, Hermes Agent `/reasoning none`):
   the card's values are `temperature: 0.7`, `top_p: 0.8` and
   `presence_penalty: 1.5`, and **only the client can send them**. The server can't
   switch to them for you, for two reasons:
@@ -734,7 +733,7 @@ anything:
 | Agent | Sampling values | Thinking off reaches the engine as |
 |---|---|---|
 | omp 18.4.10 | none | `reasoning: {effort: "none"}`, once `omp-setup.sh` has been re-run (*Wire format*, under *omp*) |
-| pi 1.0.0 | none | `enable_thinking: false`, but only when set with `/thinking` in the session; pi 1.0.0 ignores `--thinking off` (*pi — setup*) |
+| pi 1.0.0 | none | `enable_thinking: false` (`--thinking off` or `/thinking off`), unless a role-router package overrides the level (*pi — setup*) |
 | Hermes Agent 0.21.5 | none on chat turns, from its source (not captured on the wire): a temperature goes out only when the provider's profile fixes one. Some side tasks, such as session titles, ask for 0.3 | `/reasoning none` (*Hermes Agent — setup*) |
 | Claude Code 2.1.x (`claude -p`) | none | Claude Code sends no thinking setting to this model (*Claude Code*) |
 
