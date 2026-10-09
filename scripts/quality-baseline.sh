@@ -4,12 +4,17 @@
 # baseline. Thin wrapper over quality-test.sh.
 #
 # Baselines live in results/baselines/<slug>__<mode>.json (committed — the
-# trusted n>=3 aggregates). Canonical = no-thinking (temp-0 reproducible);
-# non-canonical = enable-thinking. A baseline is an n>=3 aggregate (--repeat) so
+# trusted n>=3 aggregates). The gate mode is no-thinking (greedy under the packs' fixed
+# sampler — reproducible); enable-thinking is its companion. A baseline is an n>=3 aggregate (--repeat) so
 # run-to-run noise (~+-5-7 / 150 on the 8-pack) isn't flagged as a regression.
 #
+# Sampling: each pack's own fixed sampler (--pack-sampling), NOT quality-test.sh's
+# default of the server's sampler (#1579). A regression gate compares two runs, so
+# both must be reproducible — and benchlocal refuses --exit-on-regression under
+# server sampling. Pass --sampling-from-server to diff served-sampler runs instead.
+#
 # Usage:
-#   # diff a fresh run vs the canonical (no-thinking) baseline for a slug
+#   # diff a fresh run vs the no-thinking baseline for a slug
 #   bash scripts/quality-baseline.sh --slug vllm/qwen-35b-a3b-dual
 #   # ...vs the thinking-on baseline
 #   bash scripts/quality-baseline.sh --slug vllm/qwen-35b-a3b-dual --mode enable-thinking
@@ -24,7 +29,7 @@
 #
 # Flags:
 #   --slug <registry-slug>   REQUIRED. e.g. vllm/qwen-35b-a3b-dual ('/' -> '-' in the filename)
-#   --mode no-thinking|enable-thinking   default: no-thinking (canonical)
+#   --mode no-thinking|enable-thinking   default: no-thinking (the reproducible gate)
 #   --capture                write/refresh the baseline instead of diffing against it
 #   --repeat N               runs per scenario (default 3; applies to both capture and diff)
 #   --dry-run                print the command, don't run
@@ -70,6 +75,12 @@ BASELINE_FILE="${BASELINE_DIR}/${SLUG_SAFE}__${MODE}.json"
 QT="${ROOT_DIR}/scripts/quality-test.sh"
 
 CMD=(bash "$QT" --full "$MODE_FLAG" --repeat "$REPEAT")
+# The reproducible sampler unless YOU chose one (see the header).
+_sampling_chosen=0
+for _a in "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"; do
+  [[ "$_a" == "--sampling-from-server" || "$_a" == "--pack-sampling" ]] && _sampling_chosen=1
+done
+[[ "$_sampling_chosen" == "1" || -n "${SAMPLING_FROM_SERVER:-}" ]] || CMD+=(--pack-sampling)
 if [[ "$CAPTURE" == "1" ]]; then
   CMD+=(--save-json "$BASELINE_FILE")
   echo "[quality-baseline] CAPTURE → ${BASELINE_FILE}  (n=${REPEAT}, mode=${MODE})"
