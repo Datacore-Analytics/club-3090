@@ -9,6 +9,8 @@
 #              boot with SPEC_N>0 and no drafter on disk rather than letting vLLM
 #              emit a bare missing-config.json; club-3090#1304)
 #   KV:        int8_per_token_head (1 byte/token, via vendored PR #40391 overlay)
+#   LoRA:      optional, off by default — VLLM_ENABLE_LORA=true serves one adapter
+#              (VLLM_LORA_ADAPTER_NAME / _PATH, rank <= VLLM_MAX_LORA_RANK, default 32)
 #   Vision:    off (limit-mm-per-prompt image=0 audio=0)
 #   Max ctx:   176K default (single-card boot ceiling ~185K WITH the external MTP
 #              drafter loaded at mem_util 0.94; INT8-PTH KV NIAH-clean to 240K on
@@ -93,6 +95,11 @@ services:
       # lives in the entrypoint, not in these lines, so it cannot drift.
       - SPEC_N=${SPEC_N:-}
       - SPEC=${SPEC:-}
+      # Optional LoRA adapter — defaults live in the entrypoint (off).
+      - VLLM_ENABLE_LORA=${VLLM_ENABLE_LORA:-}
+      - VLLM_LORA_ADAPTER_NAME=${VLLM_LORA_ADAPTER_NAME:-}
+      - VLLM_LORA_ADAPTER_PATH=${VLLM_LORA_ADAPTER_PATH:-}
+      - VLLM_MAX_LORA_RANK=${VLLM_MAX_LORA_RANK:-}
       - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
       # CUDA-level GPU mask — the runtime-agnostic half of GPU selection
       # (#610): launch.sh --gpus exports GPU UUIDs here. CDI runtimes (NixOS,
@@ -165,7 +172,35 @@ services:
         else
           echo "[spec] drafter OFF (SPEC_N=0 / SPEC=off) - no speculative decoding" >&2
         fi
-        exec vllm serve "$@" "$${SPEC_ARGS[@]}"
+        # -- Optional LoRA adapter (default off) ---------------------------------
+        #   VLLM_ENABLE_LORA=true      serve one adapter next to the base model
+        #   VLLM_LORA_ADAPTER_NAME     served model name (requests select it via "model")
+        #   VLLM_LORA_ADAPTER_PATH     container path under the model-cache mount
+        #   VLLM_MAX_LORA_RANK         --max-lora-rank (default 32)
+        # Like SPEC_N, an unrecognized toggle is a hard error, never a silent "off".
+        _lora="$${VLLM_ENABLE_LORA:-false}"
+        _name="$${VLLM_LORA_ADAPTER_NAME:-}"
+        _path="$${VLLM_LORA_ADAPTER_PATH:-}"
+        LORA_ARGS=()
+        case "$$_lora" in
+          true|1)
+            if [ -z "$$_name" ] || [ -z "$$_path" ]; then
+              echo "[lora] FATAL: VLLM_ENABLE_LORA=true needs VLLM_LORA_ADAPTER_NAME and VLLM_LORA_ADAPTER_PATH." >&2
+              exit 1
+            fi
+            if [ ! -f "$$_path/adapter_config.json" ]; then
+              echo "[lora] FATAL: LoRA adapter not found: $$_path/adapter_config.json" >&2
+              exit 1
+            fi
+            LORA_ARGS=(--enable-lora --max-loras 1 --max-lora-rank "$${VLLM_MAX_LORA_RANK:-32}" --lora-modules "$$_name=$$_path")
+            echo "[lora] adapter ON - $$_name=$$_path" >&2
+            ;;
+          false|0) ;;
+          *)
+            echo "[lora] VLLM_ENABLE_LORA='$$_lora' must be true or false." >&2
+            exit 1 ;;
+        esac
+        exec vllm serve "$@" "$${SPEC_ARGS[@]}" "$${LORA_ARGS[@]}"
       - --
     command:
       - --override-generation-config
