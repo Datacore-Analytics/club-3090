@@ -8,9 +8,10 @@
 # Usage:
 #   bash scripts/launch-datacore-gemma.sh            # switch + wait until ready
 #   bash scripts/launch-datacore-gemma.sh --no-wait  # any switch.sh flag passes through
+#   VLLM_ENABLE_LORA=true bash scripts/launch-datacore-gemma.sh  # + Indonesia LoRA adapter
 #
 # Serves the OpenAI-compatible API on the slug's default port (8040) as model
-# gemma-4-26b-a4b-awq.
+# gemma-4-26b-a4b-awq, plus poi-ai-gemma-silver-v1 when the LoRA adapter is enabled.
 
 set -euo pipefail
 
@@ -24,5 +25,12 @@ export GPU_MEMORY_UTILIZATION=0.94
 export MAX_NUM_SEQS=8
 export MAX_NUM_BATCHED_TOKENS=4096
 export TP=1
+
+# Optional LoRA adapter, off by default. The path is inside the container, under the
+# model-cache mount (MODEL_DIR on the host).
+export VLLM_ENABLE_LORA="${VLLM_ENABLE_LORA:-false}"
+export VLLM_LORA_ADAPTER_NAME="${VLLM_LORA_ADAPTER_NAME:-poi-ai-gemma-silver-v1}"
+export VLLM_LORA_ADAPTER_PATH="${VLLM_LORA_ADAPTER_PATH:-/root/.cache/huggingface/poi-ai-gemma-silver-v1}"
+export VLLM_MAX_LORA_RANK="${VLLM_MAX_LORA_RANK:-32}"
 
 exec bash "${ROOT_DIR}/scripts/switch.sh" "$@" vllm/gemma-26ba4b-single
