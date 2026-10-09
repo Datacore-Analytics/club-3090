@@ -307,7 +307,9 @@ auto_container() {
   # was never the PREFERRED match — it was only ever picked up by the
   # take-the-first fallback below, i.e. by luck rather than by recognition.
   local lines name
-  lines=$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
+  # The image rides along: an 8080 / 5000 container counts only with evidence it
+  # is an engine (#1584 — SearXNG on 8088→8080 was "the inference container").
+  lines=$(docker ps --format '{{.Names}}|{{.Ports}}|{{.Image}}' 2>/dev/null \
     | club_engine_port_lines || true)
   [[ -z "$lines" ]] && return 0
   name=$(printf '%s\n' "$lines" \
@@ -364,6 +366,18 @@ finish() {
 }
 trap finish EXIT
 trap 'log "interrupted"; exit 2' INT TERM
+
+# #1584: an endpoint you named decides the container — the one publishing it on
+# this host, else host mode. auto_container (the first engine container) made a
+# soak against another machine scrape this container's logs and VRAM.
+_soak_url="${ENDPOINT:-${URL:-}}"
+if [[ "$HOST_MODE" == "0" && -z "${CONTAINER:-}" && -n "$_soak_url" ]]; then
+  CONTAINER="$(club_container_for_url "$_soak_url")"
+  if [[ -z "$CONTAINER" ]]; then
+    log "no running container publishes ${_soak_url} on an engine port here"
+    HOST_MODE=1
+  fi
+fi
 
 if [[ "$HOST_MODE" == "1" ]]; then
   log "host mode: CONTAINER=none — skipping docker checks (URL must be set or auto-detected)"

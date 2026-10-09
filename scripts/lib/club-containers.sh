@@ -125,24 +125,60 @@ club_container_re_loose() {
 # 5000. ⚠️ Mirrored in tools/tui-core/club3090_tui_core/detect.py and
 # scripts/catalog.sh; test-engine-port-set-drift.sh asserts every copy matches.
 CLUB_ENGINE_PORTS_ANY='8000|8080|30000|5000'
-# Ports that identify an engine on their own. 5000 is excluded: it is also a
-# common port for unrelated apps, so it only counts for a container that is ours.
-CLUB_ENGINE_PORTS_SELF_EVIDENT='8000|8080|30000'
+# Ports that identify an engine on their own. 5000 and 8080 are not enough by
+# themselves — they are also the default ports of unrelated apps (Flask; SearXNG,
+# Open WebUI, …) — so a line publishing only those needs EVIDENCE: the container
+# is ours by name, or its image names an engine (engine_kind_from_image).
+CLUB_ENGINE_PORTS_SELF_EVIDENT='8000|30000'
+CLUB_ENGINE_PORTS_NEED_EVIDENCE='8080|5000'
 
-# club_engine_port_lines — filter `name|ports` lines (docker ps --format
-# '{{.Names}}|{{.Ports}}') on stdin down to the ones publishing an engine port.
-# 8000/8080/30000 qualify on the port alone; a line that qualifies ONLY via 5000
-# must also be one of our containers by name (#1360: TabbyAPI listens on 5000,
-# and without it every exl3 server was invisible to endpoint autodetection).
+# club_engine_port_lines — filter `name|ports[|image]` lines (docker ps --format
+# '{{.Names}}|{{.Ports}}|{{.Image}}') on stdin down to the ones publishing an
+# engine port. 8000/30000 qualify on the port alone; 8080/5000 need the evidence
+# above. #1360: TabbyAPI listens on 5000, and without it every exl3 server was
+# invisible to endpoint autodetection. #1584: 8080 used to qualify on the port
+# alone, so with no engine up every serving script on a rig running the stack's
+# own SearXNG (8088→8080) picked it as "the inference container". The image arm
+# keeps a BYO llama.cpp container (any name, a llama.cpp image) visible. Callers
+# that still send two fields get the name arm only.
+# club_container_for_url URL — the running container that publishes URL on this
+# host through an engine-internal port, or nothing (#1584). URL names the server,
+# so no evidence rule applies: whatever publishes it on an engine port IS it.
+# The one answer for "which container serves this URL?" — preflight's endpoint
+# autodetect and soak-test.sh both ask it, instead of taking the first engine
+# container (which made a run against another machine or another local port
+# read that container's logs and boot facts as its own).
+club_container_for_url() {
+  declare -F ports_serve_url >/dev/null 2>&1 \
+    || source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/listen-scope.sh"
+  local url="$1" l maps
+  [[ -n "$url" ]] || return 0
+  while IFS= read -r l; do
+    [[ -n "$l" ]] || continue
+    maps=$(cut -d'|' -f2 <<<"$l" | tr ',' '\n' \
+      | command grep -E -- "->(${CLUB_ENGINE_PORTS_ANY})/tcp" | paste -sd, - || true)
+    if [[ -n "$maps" ]] && ports_serve_url "$maps" "$url"; then
+      printf '%s\n' "${l%%|*}"
+      return 0
+    fi
+  done < <(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null || true)
+  return 0
+}
+
 club_engine_port_lines() {
-  local line re
+  declare -F engine_kind_from_image >/dev/null 2>&1 \
+    || source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/engine-kind.sh"
+  local line re name rest ports image
   re="$(club_container_re_loose)"
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    if command grep -qE -- "->(${CLUB_ENGINE_PORTS_SELF_EVIDENT})/tcp" <<<"$line"; then
+    name="${line%%|*}"; rest="${line#*|}"; image=""
+    if [[ "$rest" == *"|"* ]]; then ports="${rest%%|*}"; image="${rest#*|}"; else ports="$rest"; fi
+    if command grep -qE -- "->(${CLUB_ENGINE_PORTS_SELF_EVIDENT})/tcp" <<<"$ports"; then
       printf '%s\n' "$line"
-    elif command grep -qE -- "->5000/tcp" <<<"$line" \
-        && command grep -qE -- "$re" <<<"${line%%|*}"; then
+    elif command grep -qE -- "->(${CLUB_ENGINE_PORTS_NEED_EVIDENCE})/tcp" <<<"$ports" \
+        && { command grep -qE -- "$re" <<<"$name" \
+             || [[ -n "$image" && "$(engine_kind_from_image "$image")" != unknown ]]; }; then
       printf '%s\n' "$line"
     fi
   done
