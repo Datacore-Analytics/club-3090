@@ -195,11 +195,24 @@ fi
 MODEL_PINNED="${MODEL:+1}"
 MODEL="${MODEL:-$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo qwen3.6-27b)}"
-# Container for VRAM, GPU label and flag introspection: the one publishing URL's port, any
-# engine (#1537: the old `vllm-(qwen|gemma)` name heuristic never found an SGLang container, so
-# its card listed every GPU on the host). The heuristic stays as the last resort.
-CONTAINER="${CONTAINER:-$(URL="$URL" python3 "$PROBE_PY" --container-for-url 2>/dev/null || true)}"
-CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)}"
+# Container for VRAM, GPU label, slot count and flag introspection: the one that publishes URL on
+# THIS host through an engine port — club_container_for_url, the answer preflight's autodetect
+# and soak-test.sh use too (#1584). #1537 had replaced a `vllm-(qwen|gemma)` name heuristic with a
+# port match, but that match ignored the host, so URL=http://<another machine>:8020 still bound
+# the local :8020 container (and read ITS --max-num-seqs as the remote server's slot count), and
+# the name heuristic stayed behind as a fallback that bound one whenever nothing matched.
+# shellcheck source=lib/club-containers.sh
+source "${ROOT_DIR}/scripts/lib/club-containers.sh"
+# An explicit CONTAINER= is trusted, and CONTAINER=none (host-only — rebench-full.sh --url sets
+# it) means no container and no lookup; the Python helpers spell that as empty. Only an unset
+# CONTAINER is resolved. None found stays empty, silently: the slot detector then names "no
+# container flag", and the card's GPU scope says "rig-wide: no container to scope to" (the first
+# output line is the sweep header, which callers read).
+if [[ "${CONTAINER:-}" == "none" ]]; then
+  CONTAINER=""
+elif [[ -z "${CONTAINER:-}" ]]; then
+  CONTAINER="$(club_container_for_url "$URL")"
+fi
 
 _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true; }
 # The served context: what the ENGINE reports first (SGLang server info, vLLM /v1/models, vLLM's
